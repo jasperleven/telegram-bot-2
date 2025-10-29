@@ -5,94 +5,63 @@
 
 
 import os
-import sys
-import subprocess
-import asyncio
-
-# --- Установка зависимостей ---
-required_packages = ["python-telegram-bot>=20.0", "yt-dlp", "nest_asyncio"]
-for package in required_packages:
-    try:
-        __import__(package.split('>=')[0].replace('-', '_'))
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-# --- Импорты ---
+import yt_dlp
 import nest_asyncio
-nest_asyncio.apply()  # Для Jupyter / Anaconda
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-from yt_dlp import YoutubeDL
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+# Разрешаем asyncio работать в Render
+nest_asyncio.apply()
 
-# --- Ваш токен ---
-BOT_TOKEN = "BOT_TOKEN"
+# Берем токен из переменных окружения Render
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# --- Сброс webhook для устранения конфликта ---
-bot = Bot(BOT_TOKEN)
-bot.delete_webhook()
-print("Webhook сброшен, можно использовать polling.")
-
-# --- Настройки yt_dlp ---
-ydl_opts = {
-    'format': 'bestaudio/best',
-    'outtmpl': 'downloads/%(title)s.%(ext)s',
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'mp3',
-        'preferredquality': '192',
-    }],
-    'quiet': True,
-    'no_warnings': True,
-}
-
-os.makedirs('downloads', exist_ok=True)
-
-# --- Команды бота ---
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Отправь мне ссылку на YouTube-видео, и я скачаю его аудио в mp3."
-    )
+    await update.message.reply_text("Привет! Отправь мне ссылку на YouTube, и я скачаю видео для тебя 🎬")
 
-# --- Скачивание аудио ---
-async def download_audio(url: str):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _download_audio_sync, url)
-
-def _download_audio_sync(url: str):
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        filename = os.path.splitext(filename)[0] + ".mp3"
-        return filename, info.get('title', 'audio')
-
-# --- Обработка сообщений ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработка ссылок YouTube
+async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    await update.message.reply_text("⏳ Загружаю аудио, это может занять несколько секунд...")
+
+    if not ("youtube.com" in url or "youtu.be" in url):
+        await update.message.reply_text("❌ Это не ссылка на YouTube.")
+        return
+
+    await update.message.reply_text("⏳ Скачиваю видео, подожди немного...")
+
+    ydl_opts = {
+        "outtmpl": "video.%(ext)s",
+        "format": "mp4",
+        "quiet": True,
+    }
+
     try:
-        file_path, title = await download_audio(url)
-        if os.path.exists(file_path):
-            # Открываем файл через with, чтобы дескриптор закрылся после отправки
-            with open(file_path, 'rb') as audio_file:
-                await update.message.reply_audio(audio=audio_file, title=title)
-            await update.message.reply_text("✅ Аудио успешно загружено!")
-            os.remove(file_path)
-        else:
-            await update.message.reply_text("❌ Ошибка: файл не найден после скачивания.")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+
+        await update.message.reply_video(video=open(filename, "rb"))
+        os.remove(filename)
+
     except Exception as e:
-        await update.message.reply_text(f"❌ Произошла ошибка при скачивании: {e}")
+        await update.message.reply_text(f"⚠️ Ошибка при скачивании: {e}")
 
-# --- Запуск бота ---
+# Основная функция запуска
 async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Бот запущен...")
-    await app.run_polling(close_loop=False)
+    app = Application.builder().token(BOT_TOKEN).build()
 
-# --- Запуск для Jupyter / Anaconda и обычного .py ---
-asyncio.get_event_loop().create_task(main())
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
+
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Webhook сброшен, бот запущен в режиме polling.")
+
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 # In[ ]:
