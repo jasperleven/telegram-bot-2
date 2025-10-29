@@ -1,71 +1,92 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[ ]:
 
 
 import os
 import yt_dlp
 import nest_asyncio
-import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Разрешаем asyncio работать в Render
+# Позволяет запускать event loop на Render
 nest_asyncio.apply()
 
-# Берем токен из переменных окружения Render
+# Токен берем из переменных окружения (Render Environment Variables)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Отправь мне ссылку на YouTube, и я скачаю видео для тебя 🎬")
+# Проверяем наличие токена
+if not BOT_TOKEN:
+    raise ValueError("❌ Не найден BOT_TOKEN. Добавь его в Environment Variables на Render.")
 
-# Обработка ссылок YouTube
-async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-
-    if not ("youtube.com" in url or "youtu.be" in url):
-        await update.message.reply_text("❌ Это не ссылка на YouTube.")
-        return
-
-    await update.message.reply_text("⏳ Скачиваю видео, подожди немного...")
-
-    ydl_opts = {
-        "outtmpl": "video.%(ext)s",
-        "format": "mp4",
-        "quiet": True,
-    }
-
+# --- Логика скачивания видео ---
+async def download_video(url: str) -> str:
     try:
+        os.makedirs("downloads", exist_ok=True)
+        output_path = os.path.join("downloads", "%(title)s.%(ext)s")
+
+        # Проверяем, есть ли cookies.txt рядом со скриптом
+        cookie_path = "cookies.txt" if os.path.exists("cookies.txt") else None
+
+        ydl_opts = {
+            "format": "mp4",
+            "outtmpl": output_path,
+            "noplaylist": True,
+            "geo_bypass": True,
+            "quiet": True,
+            "cookiefile": cookie_path,
+        }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-
-        await update.message.reply_video(video=open(filename, "rb"))
-        os.remove(filename)
+            return filename
 
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка при скачивании: {e}")
+        print(f"Ошибка при скачивании: {e}")
+        return None
 
-# Основная функция запуска
-async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+
+# --- Команда /start ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎬 Привет! Отправь мне ссылку на YouTube-видео, и я скачаю его для тебя."
+    )
+
+
+# --- Получение ссылок ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+
+    if not url.startswith("http"):
+        await update.message.reply_text("⚠️ Отправь корректную ссылку на видео YouTube.")
+        return
+
+    await update.message.reply_text("⏳ Загружаю видео, подожди немного...")
+
+    filepath = await download_video(url)
+
+    if filepath and os.path.exists(filepath):
+        await update.message.reply_video(video=open(filepath, "rb"))
+        os.remove(filepath)
+    else:
+        await update.message.reply_text(
+            "❌ Не удалось скачать видео. Возможно, YouTube требует авторизацию или видео недоступно."
+        )
+
+
+# --- Основная функция ---
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    print("✅ Webhook сброшен, бот запущен в режиме polling.")
+    print("✅ Бот запущен и ожидает сообщения...")
+    app.run_polling()
 
-    await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
-
-# In[ ]:
-
-
-
+    main()
 
