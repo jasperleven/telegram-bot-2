@@ -5,88 +5,75 @@
 
 
 import os
+import asyncio
+from telegram import Update, Bot
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import yt_dlp
-import nest_asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Позволяет запускать event loop на Render
-nest_asyncio.apply()
+# ==============================
+# Настройки
+# ==============================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # задается в Environment Variables на Render
+DOWNLOAD_DIR = "downloads"
+COOKIES_FILE = "cookies.txt"  # файл cookies для авторизации YouTube (если нужно)
 
-# Токен берем из переменных окружения (Render Environment Variables)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Проверяем наличие токена
-if not BOT_TOKEN:
-    raise ValueError("❌ Не найден BOT_TOKEN. Добавь его в Environment Variables на Render.")
+# ==============================
+# Функции бота
+# ==============================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Отправь ссылку на видео YouTube для скачивания.")
 
-# --- Логика скачивания видео ---
-async def download_video(url: str) -> str:
+async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    if not url.startswith("http"):
+        await update.message.reply_text("❌ Неверная ссылка.")
+        return
+
+    await update.message.reply_text("⏳ Начинаю скачивание...")
+
+    ydl_opts = {
+        "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
+        "noplaylist": True,
+    }
+
+    # Использовать cookies, если нужно для видео с ограничением
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
+
     try:
-        os.makedirs("downloads", exist_ok=True)
-        output_path = os.path.join("downloads", "%(title)s.%(ext)s")
-
-        # Проверяем, есть ли cookies.txt рядом со скриптом
-        cookie_path = "cookies.txt" if os.path.exists("cookies.txt") else None
-
-        ydl_opts = {
-            "format": "mp4",
-            "outtmpl": output_path,
-            "noplaylist": True,
-            "geo_bypass": True,
-            "quiet": True,
-            "cookiefile": cookie_path,
-        }
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            return filename
+        await update.message.reply_text(f"✅ Видео скачано: {os.path.basename(filename)}")
+    except yt_dlp.utils.DownloadError as e:
+        await update.message.reply_text("❌ Не удалось скачать видео. Возможно, требуется авторизация или видео недоступно.")
+        print("YT-DLP Error:", e)
 
-    except Exception as e:
-        print(f"Ошибка при скачивании: {e}")
-        return None
+# ==============================
+# Запуск бота
+# ==============================
+async def main():
+    # Сбрасываем webhook на всякий случай
+    bot = Bot(BOT_TOKEN)
+    await bot.delete_webhook()
+    print("Webhook сброшен, можно использовать polling.")
 
-
-# --- Команда /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎬 Привет! Отправь мне ссылку на YouTube-видео, и я скачаю его для тебя."
-    )
-
-
-# --- Получение ссылок ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-
-    if not url.startswith("http"):
-        await update.message.reply_text("⚠️ Отправь корректную ссылку на видео YouTube.")
-        return
-
-    await update.message.reply_text("⏳ Загружаю видео, подожди немного...")
-
-    filepath = await download_video(url)
-
-    if filepath and os.path.exists(filepath):
-        await update.message.reply_video(video=open(filepath, "rb"))
-        os.remove(filepath)
-    else:
-        await update.message.reply_text(
-            "❌ Не удалось скачать видео. Возможно, YouTube требует авторизацию или видео недоступно."
-        )
-
-
-# --- Основная функция ---
-def main():
+    # Создаем приложение и регистрируем обработчики
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("help", start))  # help делает то же, что start
+    app.add_handler(CommandHandler("download", download_video))
+    app.add_handler(CommandHandler("yt", download_video))  # альтернатива /yt для скачивания
+    app.add_handler(CommandHandler("video", download_video))  # альтернатива /video
 
-    print("✅ Бот запущен и ожидает сообщения...")
-    app.run_polling()
+    # Обработчик текста (ссылки без команды)
+    app.add_handler(app.builder.message_handler(download_video))
 
+    print("Бот запущен. Ожидание сообщений...")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
 
